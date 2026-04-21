@@ -172,6 +172,10 @@ def _vpp_qwen3_model_init(self, *, vllm_config, prefix: str = ""):
         return
 
     nn.Module.__init__(self)
+    self.vllm_config = vllm_config
+    self.compilation_config = vllm_config.compilation_config
+    self.do_not_compile = True
+
     config = vllm_config.model_config.hf_config.get_text_config()
     cache_config = vllm_config.cache_config
     quant_config = vllm_config.quant_config
@@ -350,6 +354,10 @@ def _vpp_qwen3_moe_model_init(
         return
 
     nn.Module.__init__(self)
+    self.vllm_config = vllm_config
+    self.compilation_config = vllm_config.compilation_config
+    self.do_not_compile = True
+
     config = vllm_config.model_config.hf_text_config
     quant_config = vllm_config.quant_config
     eplb_config = vllm_config.parallel_config.eplb_config
