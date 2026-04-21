@@ -1643,6 +1643,32 @@ class NPUModelRunner(GPUModelRunner):
                     )
                 )
 
+            preprocess_intermediate_tensors = intermediate_tensors
+            using_dummy_preprocess_intermediates = False
+            if (preprocess_intermediate_tensors is None
+                    and not get_pp_group().is_first_rank):
+                intermediate_tokens = num_tokens_padded
+                max_actual_tokens = self.max_num_tokens
+                if enable_sp():
+                    tp_size = get_tensor_model_parallel_world_size()
+                    intermediate_tokens = (
+                        num_tokens_padded + tp_size - 1) // tp_size
+                    max_actual_tokens = (
+                        self.max_num_tokens + tp_size - 1) // tp_size
+                if self.intermediate_tensors is None:
+                    self.intermediate_tensors = (
+                        self.model.make_empty_intermediate_tensors(
+                            batch_size=max_actual_tokens,
+                            dtype=self.dtype,
+                            device=self.device,
+                        )
+                    )
+                preprocess_intermediate_tensors = IntermediateTensors({
+                    k: v[:intermediate_tokens]
+                    for k, v in self.intermediate_tensors.items()
+                })
+                using_dummy_preprocess_intermediates = True
+
             (
                 input_ids,
                 inputs_embeds,
@@ -1655,8 +1681,10 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded
                 if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
                 else total_num_scheduled_tokens,
-                intermediate_tensors,
+                preprocess_intermediate_tensors,
             )
+            if using_dummy_preprocess_intermediates:
+                intermediate_tensors = None
 
             update_cos_sin(positions)
 
