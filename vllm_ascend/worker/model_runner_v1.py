@@ -1829,6 +1829,12 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 ctx.carry_intermediate_tensors = hidden_states
             ctx.next_vp_stage += 1
+            if ctx.next_vp_stage >= ctx.vp_size:
+                # This rank has no more local VPP chunks for the batch; only
+                # the global final stage keeps state for sampling.
+                self._vpp_contexts.pop(ctx.batch_id, None)
+                self.kv_connector_output = kv_connector_output
+                return None
             return VppContinuationOutput(
                 batch_id=ctx.batch_id,
                 kv_connector_output=kv_connector_output,
