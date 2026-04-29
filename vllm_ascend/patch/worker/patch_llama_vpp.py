@@ -199,9 +199,9 @@ def _vpp_llama_model_init(
     custom_ranges = _get_custom_layer_ranges_for_rank()
     self.vpp_layer_ranges, self.layers = make_vpp_layers(
         config.num_hidden_layers,
-        lambda layer_prefix: layer_type(
+        lambda prefix: layer_type(
             vllm_config=vllm_config,
-            prefix=layer_prefix,
+            prefix=prefix,
         ),
         prefix=f"{prefix}.layers",
         vp_size=vp_size,
