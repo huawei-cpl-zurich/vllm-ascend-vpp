@@ -90,16 +90,9 @@ class AscendConfig:
         # Virtual Pipeline Parallelism (VPP)
         self.virtual_pipeline_parallel_size: int = additional_config.get(
             "virtual_pipeline_parallel_size", 1)
-        self.force_vpp_continuation: bool = bool(
-            additional_config.get("force_vpp_continuation", False)
-        )
         vp_size = self.virtual_pipeline_parallel_size
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.vpp_layer_ranges: list[list[tuple[int, int]]] | None = None
-        if self.force_vpp_continuation and pp_size <= 1:
-            raise ValueError(
-                "force_vpp_continuation requires pipeline_parallel_size > 1."
-            )
         if vp_size > 1:
             if pp_size <= 1:
                 raise ValueError(
