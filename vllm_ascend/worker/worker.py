@@ -380,7 +380,7 @@ class NPUWorker(WorkerBase):
             dp.step()
 
         vp_size = self._get_vpp_size()
-        if vp_size > 1:
+        if vp_size > 1 or self._force_vpp_continuation_enabled():
             return self._execute_model_vpp(scheduler_output, vp_size)
         return self._execute_model_regular(scheduler_output)
 
@@ -392,6 +392,17 @@ class NPUWorker(WorkerBase):
             except RuntimeError:
                 self._vpp_size_cached = 1
         return self._vpp_size_cached
+
+    def _force_vpp_continuation_enabled(self) -> bool:
+        if not hasattr(self, "_force_vpp_continuation_cached"):
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+                self._force_vpp_continuation_cached = bool(
+                    get_ascend_config().force_vpp_continuation
+                )
+            except RuntimeError:
+                self._force_vpp_continuation_cached = False
+        return self._force_vpp_continuation_cached
 
     def _get_all_gather_group(self):
         """Return the all_gather_group, respecting flashcomm1 (SP) mode."""

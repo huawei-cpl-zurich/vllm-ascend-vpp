@@ -244,8 +244,12 @@ class VppBatchContext:
     query_start_loc_cpu_snapshot: torch.Tensor
     discard_request_indices_cpu_snapshot: torch.Tensor
     num_discarded_requests_snapshot: int
+    force_continuation_only: bool = False
     next_vp_stage: int = 0
     carry_intermediate_tensors: IntermediateTensors | None = None
+    pending_final_hidden_states: torch.Tensor | IntermediateTensors | None = None
+    pending_final_kv_connector_output: "KVConnectorOutput | None" = None
+    yielded_postprocess_continuation: bool = False
 
 
 @dataclass
@@ -433,6 +437,7 @@ class NPUModelRunner(GPUModelRunner):
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
         self._vpp_contexts: dict[int, VppBatchContext] = {}
+        self._vpp_noop_continuations: set[int] = set()
         self._pending_vpp_sample_states: deque[VppPendingSampleState] = deque()
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -482,6 +487,17 @@ class NPUModelRunner(GPUModelRunner):
             except RuntimeError:
                 self._vpp_size_cached = 1
         return self._vpp_size_cached
+
+    def _force_vpp_continuation_enabled(self) -> bool:
+        if not hasattr(self, "_force_vpp_continuation_cached"):
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+                self._force_vpp_continuation_cached = bool(
+                    get_ascend_config().force_vpp_continuation
+                )
+            except RuntimeError:
+                self._force_vpp_continuation_cached = False
+        return self._force_vpp_continuation_cached
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -1185,7 +1201,7 @@ class NPUModelRunner(GPUModelRunner):
             self.use_async_scheduling and self.num_spec_tokens and self._draft_token_ids is None  # type: ignore[has-type]
         ):
             scheduler_output = deepcopy(scheduler_output)
-        if self._get_vpp_size() > 1:
+        if self._get_vpp_size() > 1 or self._force_vpp_continuation_enabled():
             return self._execute_model_vpp_yield(
                 scheduler_output, intermediate_tensors
             )
@@ -1475,6 +1491,10 @@ class NPUModelRunner(GPUModelRunner):
         if batch_id is None:
             raise RuntimeError("VPP requires SchedulerOutput.batch_id")
 
+        if batch_id in self._vpp_noop_continuations:
+            self._vpp_noop_continuations.remove(batch_id)
+            return None
+
         ctx = self._vpp_contexts.get(batch_id)
         if ctx is None:
             prepared = self._prepare_vpp_context(
@@ -1747,6 +1767,10 @@ class NPUModelRunner(GPUModelRunner):
                 : self.num_discarded_requests
             ].clone(),
             num_discarded_requests_snapshot=self.num_discarded_requests,
+            force_continuation_only=(
+                self._force_vpp_continuation_enabled()
+                and self._get_vpp_size() == 1
+            ),
         )
         return ctx, intermediate_tensors
 
@@ -1766,6 +1790,19 @@ class NPUModelRunner(GPUModelRunner):
         pp_rank = get_pp_group().rank_in_group
         pp_size = get_pp_group().world_size
         vp_stage = ctx.next_vp_stage
+
+        if ctx.force_continuation_only and ctx.yielded_postprocess_continuation:
+            hidden_states = ctx.pending_final_hidden_states
+            kv_connector_output = ctx.pending_final_kv_connector_output
+            if hidden_states is None:
+                raise RuntimeError(
+                    "Missing pending final hidden states for forced VPP continuation."
+                )
+            self._vpp_contexts.pop(ctx.batch_id, None)
+            return self._postprocess_after_forward(
+                ctx, hidden_states, kv_connector_output
+            )
+
         set_virtual_pipeline_parallel_rank(vp_stage)
 
         comm = get_vpp_comm_info(pp_rank, pp_size, vp_stage, ctx.vp_size)
@@ -1833,6 +1870,8 @@ class NPUModelRunner(GPUModelRunner):
                 # This rank has no more local VPP chunks for the batch; only
                 # the global final stage keeps state for sampling.
                 self._vpp_contexts.pop(ctx.batch_id, None)
+                if ctx.force_continuation_only:
+                    self._vpp_noop_continuations.add(ctx.batch_id)
                 self.kv_connector_output = kv_connector_output
                 return None
             return VppContinuationOutput(
@@ -1841,6 +1880,14 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         ctx.next_vp_stage += 1
+        if ctx.force_continuation_only and not ctx.yielded_postprocess_continuation:
+            ctx.pending_final_hidden_states = hidden_states
+            ctx.pending_final_kv_connector_output = kv_connector_output
+            ctx.yielded_postprocess_continuation = True
+            return VppContinuationOutput(
+                batch_id=ctx.batch_id,
+                kv_connector_output=kv_connector_output,
+            )
         self._vpp_contexts.pop(ctx.batch_id, None)
         return self._postprocess_after_forward(
             ctx, hidden_states, kv_connector_output
